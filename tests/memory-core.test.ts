@@ -13,8 +13,11 @@ import {
 	listMemories,
 	readMemory,
 	writeMemory,
+	deleteMemory,
+	removeIndexLine,
 	buildMemoryPrompt,
 	memorySummary,
+	memoryDeletedSummary,
 } from "../extensions/claude-memory/memory-core.ts";
 
 function tmpdir(): string {
@@ -224,9 +227,103 @@ test("writeMemory reports created=false with the previous body on update", () =>
 	assert.equal(out.memory.body, "second");
 });
 
+test("writeMemory keeps the previous description when description is omitted", () => {
+	const dir = tmpdir();
+	writeMemory(dir, { name: "a", description: "original", body: "one" });
+	writeMemory(dir, { name: "a", body: "two" });
+
+	assert.equal(readMemory(dir, "a")?.description, "original");
+	assert.equal(readMemory(dir, "a")?.body, "two");
+});
+
 test("memorySummary distinguishes save vs update", () => {
 	assert.equal(memorySummary("deploy-runbook", true), 'Saved memory "deploy-runbook".');
 	assert.equal(memorySummary("deploy-runbook", false), 'Updated memory "deploy-runbook".');
+});
+
+test("memoryDeletedSummary distinguishes delete vs missing", () => {
+	assert.equal(memoryDeletedSummary("deploy-runbook", true), 'Deleted memory "deploy-runbook".');
+	assert.equal(
+		memoryDeletedSummary("deploy-runbook", false),
+		'No memory named "deploy-runbook" to delete.',
+	);
+});
+
+test("removeIndexLine drops the matching pointer line, preserving the rest", () => {
+	const md = "- [A](a.md) — first\n- [B](b.md) — second\n";
+	assert.equal(removeIndexLine(md, "a.md"), "- [B](b.md) — second\n");
+});
+
+test("removeIndexLine returns an empty string when the last line goes", () => {
+	assert.equal(removeIndexLine("- [A](a.md) — first\n", "a.md"), "");
+});
+
+test("removeIndexLine leaves an index without the entry untouched", () => {
+	const md = "- [B](b.md) — second\n";
+	assert.equal(removeIndexLine(md, "a.md"), md);
+});
+
+test("deleteMemory removes the file and its index line", () => {
+	const dir = tmpdir();
+	writeMemory(dir, { name: "a", description: "da", body: "ba", title: "A", hook: "ha" });
+	writeMemory(dir, { name: "b", description: "db", body: "bb", title: "B", hook: "hb" });
+
+	assert.equal(deleteMemory(dir, "a"), true);
+	assert.equal(fs.existsSync(path.join(dir, "a.md")), false);
+	assert.equal(fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8"), "- [B](b.md) — hb\n");
+	assert.deepEqual(listMemories(dir).map((m) => m.name), ["b"]);
+});
+
+test("deleteMemory removes MEMORY.md when the index empties", () => {
+	const dir = tmpdir();
+	writeMemory(dir, { name: "a", description: "d", body: "b" });
+
+	assert.equal(deleteMemory(dir, "a"), true);
+	assert.equal(fs.existsSync(path.join(dir, "MEMORY.md")), false);
+	assert.deepEqual(listMemories(dir), []);
+	assert.equal(buildMemoryPrompt(dir), null);
+});
+
+test("deleteMemory returns false for a missing memory and still cleans a stale index line", () => {
+	const dir = tmpdir();
+	fs.writeFileSync(path.join(dir, "MEMORY.md"), "- [A](a.md) — stale\n");
+
+	assert.equal(deleteMemory(dir, "a"), false);
+	assert.equal(fs.existsSync(path.join(dir, "MEMORY.md")), false);
+});
+
+test("deleteMemory rejects a name that escapes the memory directory", () => {
+	const dir = tmpdir();
+	assert.throws(() => deleteMemory(dir, "../escape"), /name/i);
+	assert.throws(() => deleteMemory(dir, "a/b"), /name/i);
+});
+
+test("a deleted memory name can be written again", () => {
+	const dir = tmpdir();
+	writeMemory(dir, { name: "a", description: "first", body: "one" });
+	deleteMemory(dir, "a");
+
+	const out = writeMemory(dir, { name: "a", description: "second", body: "two" });
+	assert.equal(out.created, true);
+	assert.match(fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8"), /\(a\.md\)/);
+	assert.equal(readMemory(dir, "a")?.body, "two");
+});
+
+test("writeMemory output is still correct after deleteMemory of a sibling", () => {
+	const dir = tmpdir();
+	writeMemory(dir, { name: "a", description: "da", body: "ba" });
+	writeMemory(dir, { name: "b", description: "db", body: "bb" });
+	deleteMemory(dir, "a");
+
+	const index = parseIndex(fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8"));
+	assert.deepEqual(index.map((e) => e.file), ["b.md"]);
+
+	// Writing again after a delete appends, not duplicates.
+	writeMemory(dir, { name: "a", description: "da2", body: "ba2" });
+	assert.equal(
+		fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8").match(/\(a\.md\)/g)?.length,
+		1,
+	);
 });
 
 test("writeMemory output is readable by parseIndex and listMemories together", () => {
