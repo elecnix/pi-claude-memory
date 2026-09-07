@@ -22,7 +22,9 @@ import path from "node:path";
 
 import {
 	buildMemoryPrompt,
+	deleteMemory,
 	listMemories,
+	memoryDeletedSummary,
 	memoryDirFor,
 	memorySummary,
 	readMemory,
@@ -129,21 +131,34 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Save a durable fact to the memory store shared with Claude Code. Use for preferences, " +
 			"project constraints, and guidance you were given — not for things the repo or git " +
-			"history already records, and not for details that only matter in this conversation.",
+			"history already records, and not for details that only matter in this conversation. " +
+			"Pass an empty or null body to delete the memory instead.",
 		promptSnippet: "Save a durable fact to shared memory",
 		promptGuidelines: [
 			"Call memory_write when the user states a lasting preference or correction worth keeping across sessions.",
+			"Call memory_write with an empty or null body to delete a memory that is no longer wanted.",
 		],
 		parameters: Type.Object({
 			name: Type.String({ description: "Short kebab-case slug, e.g. prefers-tabs-over-spaces" }),
-			description: Type.String({
-				description: "One line summarizing the fact. Used to decide relevance during recall.",
-			}),
-			body: Type.String({
-				description:
-					"The fact itself. For feedback and project types, follow with **Why:** and " +
-					"**How to apply:** lines.",
-			}),
+			description: Type.Optional(
+				Type.String({
+					description:
+						"One line summarizing the fact. Used to decide relevance during recall. " +
+						"Omit when deleting.",
+				}),
+			),
+			body: Type.Optional(
+				Type.Union([
+					Type.String({
+						description:
+							"The fact itself. For feedback and project types, follow with **Why:** and " +
+							"**How to apply:** lines.",
+					}),
+					Type.Null({
+						description: "Pass null or an empty string to delete the memory.",
+					}),
+				]),
+			),
 			type: Type.Optional(
 				Type.String({ description: "One of: user, feedback, project, reference" }),
 			),
@@ -159,7 +174,24 @@ export default function (pi: ExtensionAPI) {
 			// turn would race and lose an index line without this queue.
 			return withFileMutationQueue(path.join(dir, "MEMORY.md"), async () => {
 				try {
-					const { memory, previous, created } = writeMemory(dir, params);
+					// An empty or null body means "delete this memory" — no separate tool.
+					if (params.body === undefined || params.body === null || params.body.trim() === "") {
+						const existed = deleteMemory(dir, params.name);
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: memoryDeletedSummary(params.name, existed),
+								},
+							],
+							details: { name: params.name, dir, deleted: true, existed },
+						};
+					}
+
+					const { memory, previous, created } = writeMemory(dir, {
+						...params,
+						body: params.body,
+					});
 					const diff =
 						previous === null
 							? undefined
@@ -190,13 +222,29 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, { expanded, isPartial }, theme, _context) {
 			if (isPartial) return new Text(theme.fg("warning", "Writing..."), 0, 0);
 			const details = result.details as
-				| { name?: string; created?: boolean; diff?: string; body?: string }
+				| {
+						name?: string;
+						created?: boolean;
+						diff?: string;
+						body?: string;
+						deleted?: boolean;
+						existed?: boolean;
+				  }
 				| undefined;
 
 			if (!details?.name) {
 				const content = result.content[0];
 				return new Text(
 					theme.fg("error", content?.type === "text" ? content.text : "Failed"),
+					0,
+					0,
+				);
+			}
+
+			if (details.deleted) {
+				const text = memoryDeletedSummary(details.name, details.existed ?? false);
+				return new Text(
+					theme.fg(details.existed ? "success" : "warning", text),
 					0,
 					0,
 				);

@@ -30,7 +30,7 @@ export interface Memory {
 
 export interface WriteMemoryInput {
 	name: string;
-	description: string;
+	description?: string;
 	body: string;
 	type?: string;
 	title?: string;
@@ -206,9 +206,44 @@ export interface WriteMemoryResult {
 	created: boolean;
 }
 
+/** Drop the pointer line for `file` from the index, preserving the rest. */
+export function removeIndexLine(md: string, file: string): string {
+	const kept = md.split("\n").filter((line) => {
+		const parsed = parseIndex(line)[0];
+		return !(parsed && parsed.file === file);
+	});
+	while (kept.length > 0 && kept[kept.length - 1].trim() === "") kept.pop();
+	return kept.length ? `${kept.join("\n")}\n` : "";
+}
+
 /** One-line summary shown for a memory_write tool result. */
 export function memorySummary(name: string, created: boolean): string {
 	return created ? `Saved memory "${name}".` : `Updated memory "${name}".`;
+}
+
+/** One-line summary shown when memory_write deletes a memory. */
+export function memoryDeletedSummary(name: string, existed: boolean): string {
+	return existed ? `Deleted memory "${name}".` : `No memory named "${name}" to delete.`;
+}
+
+/**
+ * Delete a memory: remove its file and drop its pointer line from the index.
+ * The index file itself is removed when it empties, so an empty store stays
+ * empty. Returns true when a memory file existed.
+ */
+export function deleteMemory(dir: string, name: string): boolean {
+	assertSafeName(name);
+	const file = path.join(dir, `${name}.md`);
+	const existed = fs.existsSync(file);
+	if (existed) fs.rmSync(file);
+
+	const indexFile = path.join(dir, INDEX_FILE);
+	if (fs.existsSync(indexFile)) {
+		const cleaned = removeIndexLine(fs.readFileSync(indexFile, "utf8"), `${name}.md`);
+		if (cleaned === "") fs.rmSync(indexFile);
+		else fs.writeFileSync(indexFile, cleaned);
+	}
+	return existed;
 }
 
 /** Write (or overwrite) a memory and register it in the index. */
@@ -220,7 +255,9 @@ export function writeMemory(dir: string, input: WriteMemoryInput): WriteMemoryRe
 
 	const memory: Memory = {
 		name: input.name,
-		description: input.description,
+		// Omitted description keeps the previous one (or stays empty) — an update
+		// that forgets the summary should not silently blank it.
+		description: input.description?.trim() || previous?.description || "",
 		type: input.type || DEFAULT_TYPE,
 		body: input.body.trim(),
 	};
@@ -230,7 +267,7 @@ export function writeMemory(dir: string, input: WriteMemoryInput): WriteMemoryRe
 	const index = upsertIndexLine(readIndex(dir), {
 		title: input.title?.trim() || input.name,
 		file: `${input.name}.md`,
-		hook: input.hook?.trim() || input.description,
+		hook: input.hook?.trim() || input.description || "",
 	});
 	fs.writeFileSync(path.join(dir, INDEX_FILE), index);
 
